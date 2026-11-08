@@ -29,28 +29,61 @@ def month_key(label):
 
 AGENTS = ["SingStat Python package/2.0.1 https://pypi.org/project/singstat",
           "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"]
+META = BASE.replace("/tabledata/", "/metadata/")
+PAGE = 3000  # the API returns at most 3000 data points per request
+
+def get(url, params, soft=False):
+    full = url + ("?" + urllib.parse.urlencode(params) if params else "")
+    last = ""
+    for ua in AGENTS:
+        req = urllib.request.Request(full, headers={"Accept": "application/json", "User-Agent": ua})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            body = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
+            last = f"HTTP {e.code} | body starts: {body}"
+        except Exception as e:
+            last = repr(e)
+        print("Attempt failed:", last, "| agent:", ua[:30], "| params:", list(params))
+    if soft:
+        return None
+    sys.exit("STOP: SingStat refused or failed every attempt. Last response: " + last + ". Page not changed.")
 
 def fetch():
-    today = date.today()
-    labels = [f"{y} {MON[m]}" for y in range(START_YEAR, today.year + 1) for m in range(12)]
-    queries = [{"timeFilter": ",".join(labels), "limit": 3000}, {"limit": 3000}]
-    last = ""
-    for q in queries:
-        url = BASE + "?" + urllib.parse.urlencode(q)
-        for ua in AGENTS:
-            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": ua})
-            try:
-                with urllib.request.urlopen(req, timeout=180) as r:
-                    return json.load(r)
-            except urllib.error.HTTPError as e:
-                body = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
-                last = f"HTTP {e.code} | server={e.headers.get('Server')} | body starts: {body}"
-                print("Attempt failed:", last, "| agent:", ua[:30], "| query keys:", list(q))
-            except Exception as e:
-                last = repr(e)
-                print("Attempt failed:", last)
-    sys.exit("STOP: SingStat refused or failed every attempt. Last response: " + last +
-             "\nIf this says 403 it may be blocking GitHub's computers. Run `python update.py` on your own computer instead. Page not changed.")
+    meta = get(META, {})
+    recs = ((meta.get("Data") or {}).get("records") or {}).get("row") or []
+    want = {norm(s): s for s in SERIES}
+    cand = {}
+    for r in recs:
+        k = norm(r.get("rowText", ""))
+        if k in want:
+            cand.setdefault(want[k], []).append(str(r["seriesNo"]))
+    missing = [s for s in SERIES if s not in cand]
+    if missing:
+        sys.exit(f"STOP: these series are not in the table list: {missing}. "
+                 f"First names seen: {[norm(r.get('rowText','')) for r in recs][:40]}. Page not changed.")
+    ids = {}
+    for s, c in cand.items():
+        ids[s] = min(c, key=lambda x: (len(x.split(".")), x))
+        if len(c) > 1:
+            print(f"Note: '{s}' appears {len(c)} times {c}; using {ids[s]}")
+    print("Series numbers:", ids)
+    merged, offset = {}, 0
+    for _ in range(12):
+        js = get(BASE, {"seriesNoOrRowNo": ",".join(ids.values()), "limit": PAGE, "offset": offset}, soft=offset > 0)
+        if js is None:
+            break
+        n = 0
+        for r in (js.get("Data") or {}).get("row") or []:
+            m = merged.setdefault(r["seriesNo"], {"rowText": r["rowText"], "columns": []})
+            cols = r.get("columns") or []
+            m["columns"] += cols
+            n += len(cols)
+        if n < PAGE:
+            break
+        offset += PAGE
+    return {"Data": {"row": list(merged.values())}}
 
 def extract(js):
     rows = (js.get("Data") or {}).get("row")

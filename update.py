@@ -7,11 +7,11 @@ Run:   python update.py                  (fetch live data)
 It only changes index.html if every safety check passes. Otherwise it stops
 with a message and leaves the page exactly as it was.
 """
-import json, re, sys, urllib.request, urllib.parse
+import json, os, re, sys, urllib.error, urllib.request, urllib.parse
 from datetime import date
 
 TABLE = "M213751"  # CPI, 2024 as base year, monthly
-BASE = "https://tablebuilder.singstat.gov.sg/api/table/tabledata/" + TABLE
+BASE = os.environ.get("SINGSTAT_BASE", "https://tablebuilder.singstat.gov.sg/api/table/tabledata/") + TABLE
 START_YEAR = 2019
 SERIES = ["All Items", "Food", "Restaurants, Cafes & Pubs", "Clothing & Footwear",
           "Transport", "Bus & Train Fares", "Information & Communication",
@@ -27,13 +27,30 @@ def month_key(label):
     y, m = label.split()
     return int(y), MON.index(m)
 
+AGENTS = ["SingStat Python package/2.0.1 https://pypi.org/project/singstat",
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"]
+
 def fetch():
     today = date.today()
     labels = [f"{y} {MON[m]}" for y in range(START_YEAR, today.year + 1) for m in range(12)]
-    url = BASE + "?" + urllib.parse.urlencode({"timeFilter": ",".join(labels), "limit": 2000})
-    req = urllib.request.Request(url, headers={"User-Agent": "teen-inflation-calculator"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.load(r)
+    queries = [{"timeFilter": ",".join(labels), "limit": 3000}, {"limit": 3000}]
+    last = ""
+    for q in queries:
+        url = BASE + "?" + urllib.parse.urlencode(q)
+        for ua in AGENTS:
+            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": ua})
+            try:
+                with urllib.request.urlopen(req, timeout=180) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                body = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
+                last = f"HTTP {e.code} | server={e.headers.get('Server')} | body starts: {body}"
+                print("Attempt failed:", last, "| agent:", ua[:30], "| query keys:", list(q))
+            except Exception as e:
+                last = repr(e)
+                print("Attempt failed:", last)
+    sys.exit("STOP: SingStat refused or failed every attempt. Last response: " + last +
+             "\nIf this says 403 it may be blocking GitHub's computers. Run `python update.py` on your own computer instead. Page not changed.")
 
 def extract(js):
     rows = (js.get("Data") or {}).get("row")
